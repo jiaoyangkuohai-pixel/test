@@ -1,0 +1,185 @@
+# app.py
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
+from playwright.async_api import async_playwright
+from contextlib import asynccontextmanager
+import asyncio
+import io
+import base64
+
+playwright = None
+browser = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global playwright, browser
+    playwright = await async_playwright().start()
+    browser = await playwright.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=WebRtcHideLocalIpsWithMdns",
+        ],
+    )
+    try:
+        yield
+    finally:
+        await browser.close()
+        await playwright.stop()
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/render")
+async def render(url: str = Query(..., description="要访问的网页URL")):
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="URL 必须以 http/https 开头")
+
+    context = await browser.new_context()
+    page = await context.new_page()
+    try:
+        await page.goto(url, timeout=30000, wait_until="networkidle")
+        content = await page.content()
+        return JSONResponse({"url": url, "content": content})
+    finally:
+        await context.close()
+
+
+@app.get("/screenshot")
+async def screenshot(url: str = Query(..., description="要截图的网页URL")):
+    """
+    多策略截图（1~5 依次回退）：
+    1. 直接全页截图
+    2. 清理遮挡/高 z-index fixed 元素后截图
+    3. 通过 CDP 的 Page.captureScreenshot 截图
+    4. 禁用 JavaScript 后截图
+    5. 兜底：打印为 PDF（application/pdf）
+    """
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="URL 必须以 http/https 开头")
+
+    # —— 公共上下文（方法1/2/3） ——
+    context = await browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/116.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1920, "height": 1080},
+        bypass_csp=True,
+    )
+
+    page = await context.new_page()
+
+    # 尽量减少被自动化特征探测（轻量，无外部依赖）
+    await context.add_init_script("""
+        // 隐藏 webdriver 标记
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        // 温和覆盖 Canvas 指纹接口（必要时可打开）
+        // HTMLCanvasElement.prototype.toDataURL = function() {
+        //   return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+P+/HgAFeAJ5gMmAAAAABJRU5ErkJggg==";
+        // };
+    """)
+
+    try:
+        await page.goto(url, timeout=30000, wait_until="networkidle")
+        await asyncio.sleep(2)  # 给反爬脚本一点加载时间
+
+        # 方法1：直接全页截图
+        try:
+            img = await page.screenshot(full_page=True)
+            return StreamingResponse(io.BytesIO(img), media_type="image/png")
+        except Exception as e1:
+            print(f"方法1失败：{e1}")
+
+        # 方法2：清除疑似遮挡物后再截图
+        try:
+            await page.evaluate("""
+                () => {
+                    // 1) 删除常见的反截图浮层（按类名关键词）
+                    const suspect = [
+                        '[class*="anti-screenshot"]',
+                        '[id*="anti-screenshot"]',
+                        'div[class*="watermark"]',
+                        'div[class*="modal"]',
+                        'div[class*="overlay"]',
+                        'div[class*="blocker"]'
+                    ];
+                    document.querySelectorAll(suspect.join(',')).forEach(el => el.remove());
+
+                    // 2) 隐藏高 z-index 且 position:fixed 的元素
+                    const all = Array.from(document.querySelectorAll('*'));
+                    for (const el of all) {
+                        const cs = getComputedStyle(el);
+                        const zi = parseInt(cs.zIndex || '0', 10);
+                        if (cs.position === 'fixed' && zi >= 999) {
+                            el.style.setProperty('display', 'none', 'important');
+                            el.style.setProperty('visibility', 'hidden', 'important');
+                            el.style.setProperty('opacity', '0', 'important');
+                        }
+                    }
+
+                    // 3) 允许选择/复制（有些站点禁用 user-select）
+                    const html = document.documentElement;
+                    html.style.setProperty('-webkit-user-select', 'text', 'important');
+                    html.style.setProperty('user-select', 'text', 'important');
+                }
+            """)
+            await asyncio.sleep(0.5)
+            img = await page.screenshot(full_page=True)
+            return StreamingResponse(io.BytesIO(img), media_type="image/png")
+        except Exception as e2:
+            print(f"方法2失败：{e2}")
+
+        # 方法3：走 CDP 的 Page.captureScreenshot（更底层）
+        try:
+            client = await context.new_cdp_session(page)
+            # captureBeyondViewport=True 可超出视口捕获；fromSurface=True 走合成器表面
+            res = await client.send("Page.captureScreenshot", {
+                "format": "png",
+                "captureBeyondViewport": True,
+                "fromSurface": True
+            })
+            img = base64.b64decode(res["data"])
+            return StreamingResponse(io.BytesIO(img), media_type="image/png")
+        except Exception as e3:
+            print(f"方法3失败（CDP）：{e3}")
+
+    finally:
+        await context.close()
+
+    # 方法4：禁用 JS 后再截图（新上下文）
+    context_js_off = await browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/116.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1920, "height": 1080},
+        bypass_csp=True,
+        java_script_enabled=False,
+    )
+    page_js_off = await context_js_off.new_page()
+    try:
+        await page_js_off.goto(url, timeout=25000, wait_until="domcontentloaded")
+        img = await page_js_off.screenshot(full_page=True)
+        return StreamingResponse(io.BytesIO(img), media_type="image/png")
+    except Exception as e4:
+        print(f"方法4失败（JS off）：{e4}")
+    finally:
+        await context_js_off.close()
+
+    # 方法5：兜底——打印为 PDF（Chromium 专属；可能与网站打印样式相关）
+    context_pdf = await browser.new_context(viewport={"width": 1280, "height": 720})
+    page_pdf = await context_pdf.new_page()
+    try:
+        await page_pdf.goto(url, timeout=30000, wait_until="networkidle")
+        pdf = await page_pdf.pdf(print_background=True)
+        # 直接返回 PDF
+        headers = {"Content-Disposition": 'inline; filename="page.pdf"'}
+        return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf", headers=headers)
+    except Exception as e5:
+        print(f"方法5失败（PDF）：{e5}")
+        raise HTTPException(status_code=500, detail="所有截图方案均失败")
+    finally:
+        await context_pdf.close()
