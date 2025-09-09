@@ -1,0 +1,40 @@
+from fastapi import FastAPI, Query, HTTPException
+from playwright.async_api import async_playwright
+from contextlib import asynccontextmanager
+
+playwright = None
+browser = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global playwright, browser
+    # 启动阶段
+    playwright = await async_playwright().start()
+    browser = await playwright.chromium.launch(headless=True)
+    yield
+    # 关闭阶段
+    await browser.close()
+    await playwright.stop()
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/render")
+async def render(url: str = Query(..., description="要访问的网页URL")):
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="URL 必须以 http/https 开头")
+
+    # 每个请求创建独立上下文（相当于一个无痕窗口）
+    context = await browser.new_context()
+    page = await context.new_page()
+    try:
+        await page.goto(url, timeout=20000, wait_until="networkidle")
+        content = await page.content()  # 获取完整渲染后的 HTML
+        return {"url": url, "content": content}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"渲染失败: {str(e)}")
+    finally:
+        await context.close()
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
