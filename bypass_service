@@ -1,0 +1,96 @@
+from playwright.sync_api import sync_playwright, TimeoutError
+import time
+
+def bypass_screenshot_restrictions(url, output_path):
+    with sync_playwright() as p:
+        # 启动浏览器时配置规避检测参数
+        browser = p.chromium.launch(
+            headless=True,  # 先使用有头模式调试
+            args=[
+                "--no-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=WebRtcHideLocalIpsWithMdns"  # 禁用部分检测特征
+            ]
+        )
+        
+        # 创建隐私模式上下文（避免缓存和Cookie影响）
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            bypass_csp=True  # 绕过内容安全策略（可能影响截图限制）
+        )
+        
+        page = context.new_page()
+        
+        try:
+            # 1. 提前注入脚本移除截图阻止事件
+            page.add_init_script("""
+                // 移除beforeprint事件（部分网站用此检测打印/截图）
+                window.addEventListener = function(type, listener) {
+                    if (type !== 'beforeprint' && type !== 'afterprint') {
+                        return originalAddEventListener.apply(this, arguments);
+                    }
+                };
+                
+                // 覆盖Canvas的toDataURL方法（防止网站检测Canvas截图）
+                HTMLCanvasElement.prototype.toDataURL = function() {
+                    return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+P+/HgAFeAJ5gMmAAAAABJRU5ErkJggg==";
+                };
+            """)
+
+            # 访问目标网址
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            time.sleep(2)  # 等待可能的反爬脚本加载
+
+            # 2. 尝试直接截图（基础方法）
+            try:
+                page.screenshot(path=output_path, full_page=True)
+                print(f"方法1：直接截图成功，保存至 {output_path}")
+                return
+            except Exception as e:
+                print(f"方法1失败：{str(e)}，尝试备用方案...")
+
+            # 3. 隐藏页面中的遮挡元素（如防截图浮层）
+            try:
+                # 移除所有可能遮挡的元素（根据实际页面调整选择器）
+                page.evaluate("""
+                    () => {
+                        const blockers = document.querySelectorAll('div[class*="anti-screenshot"], div[style*="fixed"]');
+                        blockers.forEach(el => el.remove());
+                    }
+                """)
+                time.sleep(1)
+                page.screenshot(path=output_path, full_page=True)
+                print(f"方法2：移除遮挡元素后截图成功，保存至 {output_path}")
+                return
+            except Exception as e:
+                print(f"方法2失败：{str(e)}，尝试备用方案...")
+
+            # 4. 使用低级别的视口截图（绕过页面级限制）
+            try:
+                # 捕获整个浏览器窗口（需要有头模式）
+                browser.screenshot(path=output_path)
+                print(f"方法3：浏览器窗口截图成功，保存至 {output_path}")
+                return
+            except Exception as e:
+                print(f"方法3失败：{str(e)}，尝试备用方案...")
+
+            # 5. 禁用JavaScript后截图（可能影响页面渲染）
+            try:
+                page = context.new_page(java_script_enabled=False)
+                page.goto(url, wait_until="domcontentloaded")
+                page.screenshot(path=output_path, full_page=True)
+                print(f"方法4：禁用JS后截图成功，保存至 {output_path}")
+                return
+            except Exception as e:
+                print(f"方法5失败：{str(e)}，所有方案尝试完毕")
+
+        finally:
+            context.close()
+            browser.close()
+
+if __name__ == "__main__":
+    target_url = "https://www.baidu.com"  # 替换为需要截图的网址
+    output_file = "bypassed_screenshot.png"
+    bypass_screenshot_restrictions(target_url, output_file)
+    
