@@ -30,6 +30,11 @@ class NCCLMultiNodeTester:
         
     def init_distributed(self):
         """初始化分布式环境"""
+        # 设置OpenMP线程数 (避免多进程线程竞争)
+        os.environ['OMP_NUM_THREADS'] = '1'
+        os.environ['MKL_NUM_THREADS'] = '1'
+        os.environ['NUMEXPR_NUM_THREADS'] = '1'
+        
         # 设置NCCL环境变量
         os.environ['NCCL_ALGO'] = 'Ring'
         os.environ['NCCL_DEBUG'] = 'INFO'
@@ -39,17 +44,25 @@ class NCCLMultiNodeTester:
         # 初始化进程组 - torchrun已经设置了环境变量
         dist.init_process_group(backend='nccl')
         
-        # 设置设备
+        # 设置设备 - 支持CUDA_VISIBLE_DEVICES
         self.device = torch.device(f"cuda:{self.local_rank}")
         torch.cuda.set_device(self.device)
         
         # 获取节点信息
         hostname = socket.gethostname()
         
+        # 获取CUDA设备信息
+        cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES', 'ALL')
+        actual_device_id = torch.cuda.current_device()
+        device_name = torch.cuda.get_device_name(actual_device_id)
+        
         print(f"进程 {self.rank} 初始化完成:")
         print(f"  - 节点: {hostname} (NODE_RANK: {self.node_rank})")
         print(f"  - 本地RANK: {self.local_rank}")
-        print(f"  - 设备: {self.device}")
+        print(f"  - CUDA_VISIBLE_DEVICES: {cuda_visible_devices}")
+        print(f"  - 实际设备ID: {actual_device_id}")
+        print(f"  - 设备名称: {device_name}")
+        print(f"  - PyTorch设备: {self.device}")
         print(f"  - 总进程数: {self.world_size}")
         print(f"  - 本地进程数: {self.local_world_size}")
         
