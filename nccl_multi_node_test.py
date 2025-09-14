@@ -53,19 +53,51 @@ class NCCLMultiNodeTester:
         
         # 获取CUDA设备信息
         cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES', 'ALL')
-        actual_device_id = torch.cuda.current_device()
-        device_name = torch.cuda.get_device_name(actual_device_id)
+        logical_device_id = torch.cuda.current_device()
+        device_name = torch.cuda.get_device_name(logical_device_id)
+        
+        # 计算物理设备ID
+        physical_device_id = self._get_physical_device_id(cuda_visible_devices, logical_device_id)
         
         print(f"进程 {self.rank} 初始化完成:")
         print(f"  - 节点: {hostname} (NODE_RANK: {self.node_rank})")
         print(f"  - 本地RANK: {self.local_rank}")
         print(f"  - CUDA_VISIBLE_DEVICES: {cuda_visible_devices}")
-        print(f"  - 实际设备ID: {actual_device_id}")
+        print(f"  - 逻辑设备ID: {logical_device_id}")
+        print(f"  - 物理设备ID: {physical_device_id}")
         print(f"  - 设备名称: {device_name}")
         print(f"  - PyTorch设备: {self.device}")
         print(f"  - 总进程数: {self.world_size}")
         print(f"  - 本地进程数: {self.local_world_size}")
         
+    def _get_physical_device_id(self, cuda_visible_devices: str, logical_device_id: int) -> int:
+        """计算物理设备ID"""
+        if cuda_visible_devices == 'ALL' or not cuda_visible_devices:
+            return logical_device_id
+        
+        try:
+            # 解析CUDA_VISIBLE_DEVICES
+            visible_devices = []
+            for part in cuda_visible_devices.split(','):
+                part = part.strip()
+                if '-' in part:
+                    # 处理范围，如 "0-3"
+                    start, end = map(int, part.split('-'))
+                    visible_devices.extend(range(start, end + 1))
+                else:
+                    # 处理单个设备
+                    visible_devices.append(int(part))
+            
+            # 根据逻辑设备ID获取物理设备ID
+            if 0 <= logical_device_id < len(visible_devices):
+                return visible_devices[logical_device_id]
+            else:
+                return logical_device_id
+                
+        except (ValueError, IndexError) as e:
+            print(f"警告: 无法解析CUDA_VISIBLE_DEVICES '{cuda_visible_devices}': {e}")
+            return logical_device_id
+    
     def cleanup(self):
         """清理分布式环境"""
         if dist.is_initialized():
