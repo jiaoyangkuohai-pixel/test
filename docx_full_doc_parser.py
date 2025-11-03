@@ -5,7 +5,6 @@ from PIL import Image
 from html import escape
 from docx.document import Document as DocumentObject
 from docx.table import Table, _Cell
-from torch import return_types
  
 def iter_block_items(parent: DocumentObject):
     """
@@ -93,7 +92,7 @@ def _build_row_grid(row):
     return slots
 
 
-def _parser_table(table: Table):
+def _parser_table(doc, table: Table):
     html_lines = []
     html_lines.append('<table>')
     rows = table.rows
@@ -229,6 +228,7 @@ def get_doc_text(doc: DocumentObject):
                 htlm_table = _parser_table(table)
                 doc_parsed.append(htlm_table)
     return doc_parsed
+
 if __name__ == "__main__":
     # 打开文档
     doc_path = "/data/code/learn/work/chunk/data/ragflow_table_img.docx"
