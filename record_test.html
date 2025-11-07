@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>音频录制</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #f0f0f0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background-image: linear-gradient(to right, #e0e0e0 1px, transparent 1px),
+                        linear-gradient(to bottom, #e0e0e0 1px, transparent 1px);
+      background-size: 20px 20px;
+    }
+    .container {
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+      padding: 20px;
+      width: 320px;
+      text-align: center;
+    }
+    .hidden { display: none; }
+    button {
+      margin: 10px;
+      padding: 10px 16px;
+      border: none;
+      border-radius: 6px;
+      background-color: #007bff;
+      color: white;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    button:disabled { background-color: #ccc; cursor: not-allowed; }
+    .audio-player { width: 100%; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="pre-record">
+      <h2>开始录制前</h2>
+      <p>这里是声</p>
+      <p>纤波浪线</p>
+      <button id="start-recording" aria-label="开始录制">开始录制</button>
+      <button id="stop-recording" aria-label="停止录制" disabled>停止录制</button>
+    </div>
+
+    <div id="post-record" class="hidden">
+      <h2>录制后</h2>
+      <p>这里是声</p>
+      <p>纤波浪线</p>
+      <button id="play-recording" aria-label="播放录音" disabled>播放录音</button>
+      <button id="download-recording" aria-label="下载录音" disabled>下载</button>
+      <button id="start-recording-again" aria-label="重新录制">重新录制</button>
+    </div>
+
+    <audio id="audio-player" class="audio-player hidden" controls aria-label="录音播放控件"></audio>
+  </div>
+
+  <script>
+    // 全局状态与变量
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let finalBlob = null;
+    let finalUrl = null;
+    let stream = null;
+
+    const preRecordDiv = document.getElementById('pre-record');
+    const postRecordDiv = document.getElementById('post-record');
+    const audioPlayer = document.getElementById('audio-player');
+    const startRecordingBtn = document.getElementById('start-recording');
+    const stopRecordingBtn = document.getElementById('stop-recording');
+    const playRecordingBtn = document.getElementById('play-recording');
+    const downloadRecordingBtn = document.getElementById('download-recording');
+    const startRecordingAgainBtn = document.getElementById('start-recording-again');
+
+    // 能力检测
+    function isRecorderSupported() {
+      return !!(window.MediaRecorder && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function');
+    }
+
+    // 开始录制
+    async function startRecording() {
+      if (!isRecorderSupported()) {
+        alert('当前浏览器不支持录音功能，请使用支持 MediaRecorder 的浏览器（如 Chrome/Edge/Firefox）并通过 HTTPS 访问。');
+        return;
+      }
+
+      // 释放上一轮的 finalUrl
+      if (finalUrl) {
+        URL.revokeObjectURL(finalUrl);
+        finalUrl = null;
+        finalBlob = null;
+      }
+
+      // 关闭上一次流，确保麦克风资源释放
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+
+        mediaRecorder.ondataavailable = (e) => {
+          if (e && e.data && e.data.size > 0) {
+            audioChunks.push(e.data);
+          }
+        };
+
+        mediaRecorder.onstop = () => {
+          const mimeType = mediaRecorder.mimeType || 'audio/webm';
+          finalBlob = new Blob(audioChunks, { type: mimeType });
+          finalUrl = URL.createObjectURL(finalBlob);
+          audioPlayer.src = finalUrl;
+          audioPlayer.classList.remove('hidden');
+          playRecordingBtn.disabled = false;
+          downloadRecordingBtn.disabled = false;
+
+          // 释放麦克风流
+          if (stream) {
+            stream.getTracks().forEach(t => t.stop());
+            stream = null;
+          }
+
+          // 清空缓存数据，便于下一轮录音
+          audioChunks = [];
+        };
+
+        mediaRecorder.onerror = (ev) => {
+          console.error('录音错误：', ev);
+          alert('录音发生错误，请重试。');
+        };
+
+        mediaRecorder.start();
+
+        // UI 更新
+        preRecordDiv.classList.add('hidden');
+        postRecordDiv.classList.remove('hidden');
+        startRecordingBtn.disabled = true;
+        stopRecordingBtn.disabled = false;
+      } catch (err) {
+        console.error(err);
+        alert('无法获取麦克风权限，请在浏览器设置中允许网页访问麦克风。');
+      }
+    }
+
+    // 停止录制
+    function stopRecording() {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+      }
+      // onstop 会处理后续 UI 更新
+    }
+
+    // 下载扩展名推断
+    function inferExtensionFromMime(mime) {
+      if (!mime) return 'webm';
+      if (mime.includes('wav')) return 'wav';
+      if (mime.includes('ogg')) return 'ogg';
+      if (mime.includes('webm')) return 'webm';
+      return 'webm';
+    }
+
+    // 事件绑定
+    startRecordingBtn.addEventListener('click', startRecording);
+    stopRecordingBtn.addEventListener('click', stopRecording);
+
+    playRecordingBtn.addEventListener('click', () => {
+      if (audioPlayer.src) audioPlayer.play();
+    });
+
+    downloadRecordingBtn.addEventListener('click', () => {
+      if (!finalUrl || !finalBlob) return;
+      const mime = finalBlob.type || mediaRecorder?.mimeType || '';
+      const ext = inferExtensionFromMime(mime);
+      const a = document.createElement('a');
+      a.href = finalUrl;
+      a.download = 'recording.' + ext;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    });
+
+    startRecordingAgainBtn.addEventListener('click', () => {
+      // 重置 UI，准备再次录音
+      preRecordDiv.classList.remove('hidden');
+      postRecordDiv.classList.add('hidden');
+      audioPlayer.classList.add('hidden');
+      audioPlayer.src = '';
+      if (finalUrl) URL.revokeObjectURL(finalUrl);
+      finalUrl = null;
+      finalBlob = null;
+      audioChunks = [];
+    });
+  </script>
+</body>
+</html>
